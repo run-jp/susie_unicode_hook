@@ -76,6 +76,8 @@ Susie本体、およびロードされる Susie プラグイン (*.spi) の IAT
 フックし、それぞれ対応する Unicode API に「橋渡し」する\
 `GetCommandLineA`もフックしているため、Susie 自身のファイルアクセスだけでなく、
 関連付け起動やドラッグ&ドロップで渡されるパスにも対応する
+また、Susie から受け取ったパス名を自前で Unicode に変換して W系API (`CreateFileW`, `FindFirstFileW` 等) で
+開くプラグイン (例: `ax7z_s.spi`) にも対応するため、W系API もフックし、仮想ANSIパス名を実Unicodeパス名に戻して渡す
 
 ```
 SusieUnicode.exe

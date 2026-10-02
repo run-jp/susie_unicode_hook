@@ -431,11 +431,10 @@ static BOOL TryResolveByLiveDirectoryScan(const WCHAR *realDirW, const char *ali
    Unicode名フォルダが何階層あっても解決できる。変換テーブルに無ければ
    TryResolveByLiveDirectoryScan で再解決を試みる。
    戻り値: 1箇所でもエイリアス置換が発生したら TRUE                */
-static BOOL ResolveFullPathAliases(const char *ansiPath, WCHAR *outRealW, size_t outSizeChars)
+static BOOL ResolveFullPathAliasesW(const WCHAR *widePath, WCHAR *outRealW, size_t outSizeChars)
 {
-    /* 先にWideへ変換してから区切る (Shift_JISの2バイト目の 0x5C を '\' と誤認しないため) */
     WCHAR work[2048];
-    if (!MultiByteToWideChar(CP_ACP, 0, ansiPath, -1, work, 2048)) work[0] = 0;
+    wcsncpy(work, widePath, 2047);
     work[2047] = 0;
 
     WCHAR realAccum[MAX_PATH];
@@ -502,6 +501,27 @@ static BOOL ResolveFullPathAliases(const char *ansiPath, WCHAR *outRealW, size_t
     wcsncpy(outRealW, realAccum, outSizeChars - 1);
     outRealW[outSizeChars - 1] = 0;
     return anyResolved;
+}
+
+static BOOL ResolveFullPathAliases(const char *ansiPath, WCHAR *outRealW, size_t outSizeChars)
+{
+    /* 先にWideへ変換してから区切る (Shift_JISの2バイト目の 0x5C を '\' と誤認しないため) */
+    WCHAR work[2048];
+    if (!MultiByteToWideChar(CP_ACP, 0, ansiPath, -1, work, 2048)) work[0] = 0;
+    work[2047] = 0;
+    return ResolveFullPathAliasesW(work, outRealW, outSizeChars);
+}
+
+/* Wideパスに仮想ANSI名("SUF..."/"SUD...")らしき階層が含まれるか
+   (W系APIフックで、無関係なパスを素通しするための事前判定)      */
+static BOOL WidePathMayContainAlias(const WCHAR *widePath)
+{
+    for (const WCHAR *p = widePath; *p; p++) {
+        if ((p == widePath || p[-1] == L'\\') &&
+            p[0] == L'S' && p[1] == L'U' && (p[2] == L'F' || p[2] == L'D'))
+            return TRUE;
+    }
+    return FALSE;
 }
 
 /* ANSIパス中の最後の '\' を探す (2バイト文字の2バイト目の 0x5C を誤認しない) */
@@ -651,6 +671,11 @@ typedef DWORD_PTR (WINAPI *SHGetFileInfoA_t)(LPCSTR, DWORD, SHFILEINFOA *, UINT,
 typedef HMODULE (WINAPI *LoadLibraryA_t)(LPCSTR);
 typedef HMODULE (WINAPI *LoadLibraryExA_t)(LPCSTR, HANDLE, DWORD);
 typedef LPSTR  (WINAPI *GetCommandLineA_t)(void);
+typedef HANDLE (WINAPI *CreateFileW_t)(LPCWSTR, DWORD, DWORD,
+                                        LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
+typedef HANDLE (WINAPI *FindFirstFileW_t)(LPCWSTR, LPWIN32_FIND_DATAW);
+typedef DWORD  (WINAPI *GetFileAttributesW_t)(LPCWSTR);
+typedef BOOL   (WINAPI *GetFileAttributesExW_t)(LPCWSTR, GET_FILEEX_INFO_LEVELS, LPVOID);
 
 static FindFirstFileA_t     Real_FindFirstFileA;
 static FindNextFileA_t      Real_FindNextFileA;
@@ -677,6 +702,10 @@ static SHGetFileInfoA_t             Real_SHGetFileInfoA;
 static LoadLibraryA_t       Real_LoadLibraryA;
 static LoadLibraryExA_t     Real_LoadLibraryExA;
 static GetCommandLineA_t    Real_GetCommandLineA;
+static CreateFileW_t        Real_CreateFileW;
+static FindFirstFileW_t     Real_FindFirstFileW;
+static GetFileAttributesW_t Real_GetFileAttributesW;
+static GetFileAttributesExW_t Real_GetFileAttributesExW;
 
 static void PatchIat(HMODULE hModule);
 static HMODULE WINAPI Hook_LoadLibraryA(LPCSTR lpLibFileName);
@@ -888,6 +917,73 @@ static DWORD WINAPI Hook_GetFileAttributesA(LPCSTR lpFileName)
         Log("  -> 成功 (属性 = 0x%08lX)", result);
     }
     return result;
+}
+
+/* W系API:
+ * Susie プラグインの中には、Susie から受け取った ANSI パス名を自前で Unicode に
+ * 変換し、W系API で開くものがある (例: ax7z_s.spi は静的リンクした 7-Zip の
+ * ファイルアクセス処理から FindFirstFileW / CreateFileW を呼ぶ)
+ * その場合も仮想ANSI名がパスに含まれるので、実Unicodeパス名に戻してから呼ぶ。
+ * 仮想ANSI名を含まないパスは何もせずそのまま元の API に渡す */
+
+static HANDLE WINAPI Hook_CreateFileW(LPCWSTR lpFileName, DWORD dwDesiredAccess,
+                                       DWORD dwShareMode, LPSECURITY_ATTRIBUTES lpSA,
+                                       DWORD dwCreationDisposition, DWORD dwFlags,
+                                       HANDLE hTemplate)
+{
+    WCHAR wpath[MAX_PATH];
+    if (lpFileName && WidePathMayContainAlias(lpFileName) &&
+        ResolveFullPathAliasesW(lpFileName, wpath, MAX_PATH)) {
+        Log("CreateFileW(\"%s\")", W2U(lpFileName));
+        Log("  エイリアス解決: -> \"%s\"", W2U(wpath));
+        HANDLE h = Real_CreateFileW(wpath, dwDesiredAccess, dwShareMode, lpSA,
+                                     dwCreationDisposition, dwFlags, hTemplate);
+        if (h == INVALID_HANDLE_VALUE) Log("  -> 失敗 (エラーコード %lu)", GetLastError());
+        else Log("  -> 成功 (ハンドル %p)", h);
+        return h;
+    }
+    return Real_CreateFileW(lpFileName, dwDesiredAccess, dwShareMode, lpSA,
+                             dwCreationDisposition, dwFlags, hTemplate);
+}
+
+static HANDLE WINAPI Hook_FindFirstFileW(LPCWSTR lpFileName, LPWIN32_FIND_DATAW lpFindData)
+{
+    WCHAR wpath[MAX_PATH];
+    if (lpFileName && WidePathMayContainAlias(lpFileName) &&
+        ResolveFullPathAliasesW(lpFileName, wpath, MAX_PATH)) {
+        Log("FindFirstFileW(\"%s\")", W2U(lpFileName));
+        Log("  エイリアス解決: -> \"%s\"", W2U(wpath));
+        HANDLE h = Real_FindFirstFileW(wpath, lpFindData);
+        if (h == INVALID_HANDLE_VALUE) Log("  -> 失敗 (エラーコード %lu)", GetLastError());
+        else Log("  -> 成功 (ハンドル %p)", h);
+        return h;
+    }
+    return Real_FindFirstFileW(lpFileName, lpFindData);
+}
+
+static DWORD WINAPI Hook_GetFileAttributesW(LPCWSTR lpFileName)
+{
+    WCHAR wpath[MAX_PATH];
+    if (lpFileName && WidePathMayContainAlias(lpFileName) &&
+        ResolveFullPathAliasesW(lpFileName, wpath, MAX_PATH)) {
+        Log("GetFileAttributesW(\"%s\")", W2U(lpFileName));
+        Log("  エイリアス解決: -> \"%s\"", W2U(wpath));
+        return Real_GetFileAttributesW(wpath);
+    }
+    return Real_GetFileAttributesW(lpFileName);
+}
+
+static BOOL WINAPI Hook_GetFileAttributesExW(LPCWSTR lpFileName, GET_FILEEX_INFO_LEVELS fInfoLevelId,
+                                              LPVOID lpFileInformation)
+{
+    WCHAR wpath[MAX_PATH];
+    if (lpFileName && WidePathMayContainAlias(lpFileName) &&
+        ResolveFullPathAliasesW(lpFileName, wpath, MAX_PATH)) {
+        Log("GetFileAttributesExW(\"%s\")", W2U(lpFileName));
+        Log("  エイリアス解決: -> \"%s\"", W2U(wpath));
+        return Real_GetFileAttributesExW(wpath, fInfoLevelId, lpFileInformation);
+    }
+    return Real_GetFileAttributesExW(lpFileName, fInfoLevelId, lpFileInformation);
 }
 
 /* CloseHandle/_lclose:
@@ -1623,6 +1719,10 @@ static PatchTarget g_targets[] = {
     { "KERNEL32.dll", "LoadLibraryA",       NULL, (void*)Hook_LoadLibraryA,       (void**)&Real_LoadLibraryA },
     { "KERNEL32.dll", "LoadLibraryExA",     NULL, (void*)Hook_LoadLibraryExA,     (void**)&Real_LoadLibraryExA },
     { "KERNEL32.dll", "GetCommandLineA",    NULL, (void*)Hook_GetCommandLineA,    (void**)&Real_GetCommandLineA },
+    { "KERNEL32.dll", "CreateFileW",        NULL, (void*)Hook_CreateFileW,        (void**)&Real_CreateFileW },
+    { "KERNEL32.dll", "FindFirstFileW",     NULL, (void*)Hook_FindFirstFileW,     (void**)&Real_FindFirstFileW },
+    { "KERNEL32.dll", "GetFileAttributesW", NULL, (void*)Hook_GetFileAttributesW, (void**)&Real_GetFileAttributesW },
+    { "KERNEL32.dll", "GetFileAttributesExW", NULL, (void*)Hook_GetFileAttributesExW, (void**)&Real_GetFileAttributesExW },
 };
 static const int g_nTargets = sizeof(g_targets) / sizeof(g_targets[0]);
 static BOOL g_targetAddrsResolved = FALSE;
