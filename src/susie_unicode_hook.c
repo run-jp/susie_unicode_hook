@@ -431,12 +431,12 @@ static BOOL TryResolveByLiveDirectoryScan(const WCHAR *realDirW, const char *ali
    Unicode名フォルダが何階層あっても解決できる。変換テーブルに無ければ
    TryResolveByLiveDirectoryScan で再解決を試みる。
    戻り値: 1箇所でもエイリアス置換が発生したら TRUE                */
-static BOOL ResolveFullPathAliasesW(const WCHAR *widePath, WCHAR *outRealW, size_t outSizeChars)
-{
-    WCHAR work[2048];
-    wcsncpy(work, widePath, 2047);
-    work[2047] = 0;
+#define RESOLVE_WORK_CHARS 2048
 
+/* work (RESOLVE_WORK_CHARS文字のバッファ) を区切りながら解決する。work は書き換わる
+   (呼び出し元のスタックにある work をそのまま使い、作業バッファを二重に確保しないため) */
+static BOOL ResolveFullPathAliasesInPlace(WCHAR *work, WCHAR *outRealW, size_t outSizeChars)
+{
     WCHAR realAccum[MAX_PATH];
     realAccum[0] = 0;
     BOOL anyResolved = FALSE;
@@ -506,10 +506,21 @@ static BOOL ResolveFullPathAliasesW(const WCHAR *widePath, WCHAR *outRealW, size
 static BOOL ResolveFullPathAliases(const char *ansiPath, WCHAR *outRealW, size_t outSizeChars)
 {
     /* 先にWideへ変換してから区切る (Shift_JISの2バイト目の 0x5C を '\' と誤認しないため) */
-    WCHAR work[2048];
-    if (!MultiByteToWideChar(CP_ACP, 0, ansiPath, -1, work, 2048)) work[0] = 0;
-    work[2047] = 0;
-    return ResolveFullPathAliasesW(work, outRealW, outSizeChars);
+    WCHAR work[RESOLVE_WORK_CHARS];
+    if (!MultiByteToWideChar(CP_ACP, 0, ansiPath, -1, work, RESOLVE_WORK_CHARS)) work[0] = 0;
+    work[RESOLVE_WORK_CHARS - 1] = 0;
+    return ResolveFullPathAliasesInPlace(work, outRealW, outSizeChars);
+}
+
+/* noinline: W系APIフックに展開されると、素通しの場合も大きな作業バッファを
+   スタックに確保してしまうため */
+static __attribute__((noinline))
+BOOL ResolveFullPathAliasesW(const WCHAR *widePath, WCHAR *outRealW, size_t outSizeChars)
+{
+    WCHAR work[RESOLVE_WORK_CHARS];
+    wcsncpy(work, widePath, RESOLVE_WORK_CHARS - 1);
+    work[RESOLVE_WORK_CHARS - 1] = 0;
+    return ResolveFullPathAliasesInPlace(work, outRealW, outSizeChars);
 }
 
 /* Wideパスに仮想ANSI名("SUF..."/"SUD...")らしき階層が含まれるか
