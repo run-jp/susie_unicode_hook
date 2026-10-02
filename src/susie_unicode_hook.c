@@ -938,8 +938,10 @@ static HANDLE WINAPI Hook_CreateFileW(LPCWSTR lpFileName, DWORD dwDesiredAccess,
         Log("  エイリアス解決: -> \"%s\"", W2U(wpath));
         HANDLE h = Real_CreateFileW(wpath, dwDesiredAccess, dwShareMode, lpSA,
                                      dwCreationDisposition, dwFlags, hTemplate);
-        if (h == INVALID_HANDLE_VALUE) Log("  -> 失敗 (エラーコード %lu)", GetLastError());
+        DWORD err = GetLastError(); /* ログ出力で上書きされないよう退避 */
+        if (h == INVALID_HANDLE_VALUE) Log("  -> 失敗 (エラーコード %lu)", err);
         else Log("  -> 成功 (ハンドル %p)", h);
+        SetLastError(err);
         return h;
     }
     return Real_CreateFileW(lpFileName, dwDesiredAccess, dwShareMode, lpSA,
@@ -954,8 +956,10 @@ static HANDLE WINAPI Hook_FindFirstFileW(LPCWSTR lpFileName, LPWIN32_FIND_DATAW 
         Log("FindFirstFileW(\"%s\")", W2U(lpFileName));
         Log("  エイリアス解決: -> \"%s\"", W2U(wpath));
         HANDLE h = Real_FindFirstFileW(wpath, lpFindData);
-        if (h == INVALID_HANDLE_VALUE) Log("  -> 失敗 (エラーコード %lu)", GetLastError());
+        DWORD err = GetLastError(); /* ログ出力で上書きされないよう退避 */
+        if (h == INVALID_HANDLE_VALUE) Log("  -> 失敗 (エラーコード %lu)", err);
         else Log("  -> 成功 (ハンドル %p)", h);
+        SetLastError(err);
         return h;
     }
     return Real_FindFirstFileW(lpFileName, lpFindData);
